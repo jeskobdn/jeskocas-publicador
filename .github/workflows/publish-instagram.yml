@@ -1,8 +1,19 @@
 name: Publicar en Instagram
 
-# Se lanza a mano desde la pestaña "Actions" del repo: botón "Run workflow".
-# Rellenas la URL pública de la imagen y el texto del post, y este robot
-# hace las dos llamadas a la API de Meta (crear contenedor + publicar).
+# v2 (30/08/2026): la imagen ya NO se sube a postimg.cc/imgur.
+# Se sube directamente a la carpeta "images/" de este mismo repo, y el robot
+# construye la URL pública solo (vía jsDelivr) y publica en el feed y,
+# si se marca, también en Historias.
+#
+# Cómo usarlo cada vez:
+#   1. Sube la imagen final a la carpeta "images/" de este repo
+#      (entra en la carpeta -> Add file -> Upload files -> arrastra el archivo -> Commit).
+#   2. Ve a la pestaña Actions -> "Publicar en Instagram" -> Run workflow.
+#   3. En "image_filename" escribe SOLO el nombre del archivo que acabas de subir
+#      (ej: post-megaman-v1.png), no la ruta completa.
+#   4. Pega el texto del post en "caption".
+#   5. Si quieres que el mismo post salga también en Historias, escribe "si"
+#      en el campo "story" (si no, déjalo en "no", que es lo que trae por defecto).
 #
 # Secretos necesarios (Settings -> Secrets and variables -> Actions):
 #   IG_ACCOUNT_ID    -> 17841433174974811
@@ -11,21 +22,50 @@ name: Publicar en Instagram
 on:
   workflow_dispatch:
     inputs:
-      image_url:
-        description: "URL pública de la imagen (postimg.cc, imgur...)"
+      image_filename:
+        description: "Nombre del archivo ya subido a la carpeta images/ (ej: post.png)"
         required: true
       caption:
         description: "Texto del post. Para saltos de párrafo escribe \\n entre líneas"
         required: true
+      story:
+        description: "¿Publicar también en Historias? (si / no)"
+        required: false
+        default: "no"
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Crear contenedor de medios
+      - name: Construir y comprobar la URL pública de la imagen
+        id: image
+        env:
+          IMAGE_FILENAME: ${{ github.event.inputs.image_filename }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE_URL="https://cdn.jsdelivr.net/gh/$REPO@$SHA/images/$IMAGE_FILENAME"
+          echo "Probando: $IMAGE_URL"
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$IMAGE_URL")
+            if [ "$STATUS" = "200" ]; then
+              echo "Imagen encontrada (intento $i)."
+              break
+            fi
+            echo "Intento $i: la CDN aún no la sirve (status $STATUS), esperando..."
+            sleep 4
+            if [ "$i" = "5" ]; then
+              echo "::error::No se encontró la imagen en $IMAGE_URL. ¿Subiste el archivo a la carpeta images/ con ese nombre exacto, y ya está comiteado?"
+              exit 1
+            fi
+          done
+          echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Crear contenedor de medios (feed)
         id: create
         env:
-          IMAGE_URL: ${{ github.event.inputs.image_url }}
+          IMAGE_URL: ${{ steps.image.outputs.image_url }}
           CAPTION_RAW: ${{ github.event.inputs.caption }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
@@ -48,7 +88,7 @@ jobs:
       - name: Esperar a que Instagram procese la imagen
         run: sleep 15
 
-      - name: Publicar el post
+      - name: Publicar el post en el feed
         env:
           CREATION_ID: ${{ steps.create.outputs.creation_id }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
@@ -60,7 +100,36 @@ jobs:
             --data-urlencode "access_token=$IG_ACCESS_TOKEN")
           echo "Respuesta de Meta: $RESPONSE"
           if echo "$RESPONSE" | grep -q '"error"'; then
-            echo "::error::Fallo al publicar: $RESPONSE"
+            echo "::error::Fallo al publicar en el feed: $RESPONSE"
             exit 1
           fi
-          echo "✅ Publicado con éxito en @jeskocas"
+          echo "✅ Publicado en el feed de @jeskocas"
+
+      - name: Crear y publicar también en Historias (si se pidió)
+        if: ${{ github.event.inputs.story == 'si' || github.event.inputs.story == 'sí' }}
+        env:
+          IMAGE_URL: ${{ steps.image.outputs.image_url }}
+          IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media" \
+            --data-urlencode "image_url=$IMAGE_URL" \
+            --data-urlencode "media_type=STORIES" \
+            --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+          echo "Respuesta de Meta (historia): $RESPONSE"
+          CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+          if [ -z "$CREATION_ID" ]; then
+            echo "::error::No se pudo crear el contenedor de la historia: $RESPONSE"
+            exit 1
+          fi
+          sleep 10
+          RESPONSE2=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media_publish" \
+            --data-urlencode "creation_id=$CREATION_ID" \
+            --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+          echo "Respuesta de Meta (publicar historia): $RESPONSE2"
+          if echo "$RESPONSE2" | grep -q '"error"'; then
+            echo "::error::Fallo al publicar la historia: $RESPONSE2"
+            exit 1
+          fi
+          echo "✅ También publicado en Historias"

@@ -1,0 +1,66 @@
+name: Publicar en Instagram
+
+# Se lanza a mano desde la pestaña "Actions" del repo: botón "Run workflow".
+# Rellenas la URL pública de la imagen y el texto del post, y este robot
+# hace las dos llamadas a la API de Meta (crear contenedor + publicar).
+#
+# Secretos necesarios (Settings -> Secrets and variables -> Actions):
+#   IG_ACCOUNT_ID    -> 17841433174974811
+#   IG_ACCESS_TOKEN  -> el token largo de la guía del proyecto
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "URL pública de la imagen (postimg.cc, imgur...)"
+        required: true
+      caption:
+        description: "Texto del post. Para saltos de párrafo escribe \\n entre líneas"
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Crear contenedor de medios
+        id: create
+        env:
+          IMAGE_URL: ${{ github.event.inputs.image_url }}
+          CAPTION_RAW: ${{ github.event.inputs.caption }}
+          IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          CAPTION=$(printf '%b' "$CAPTION_RAW")
+          RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media" \
+            --data-urlencode "image_url=$IMAGE_URL" \
+            --data-urlencode "caption=$CAPTION" \
+            --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+          echo "Respuesta de Meta: $RESPONSE"
+          CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+          if [ -z "$CREATION_ID" ]; then
+            echo "::error::No se pudo crear el contenedor de medios: $RESPONSE"
+            exit 1
+          fi
+          echo "El contenedor se creó con id $CREATION_ID"
+          echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Esperar a que Instagram procese la imagen
+        run: sleep 15
+
+      - name: Publicar el post
+        env:
+          CREATION_ID: ${{ steps.create.outputs.creation_id }}
+          IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media_publish" \
+            --data-urlencode "creation_id=$CREATION_ID" \
+            --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+          echo "Respuesta de Meta: $RESPONSE"
+          if echo "$RESPONSE" | grep -q '"error"'; then
+            echo "::error::Fallo al publicar: $RESPONSE"
+            exit 1
+          fi
+          echo "✅ Publicado con éxito en @jeskocas"

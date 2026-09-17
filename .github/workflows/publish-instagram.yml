@@ -1,11 +1,12 @@
 name: Publicar en Instagram
 
-# v4 (17/09/2026): añadido CARRUSEL (varias imágenes en un mismo post).
+# v5 (17/09/2026): añadido FACEBOOK. (La v4 había añadido el carrusel.)
 #
 # Qué hace:
 #   - Publica en el feed de Instagram una imagen suelta O un carrusel de hasta 10.
 #   - Opcionalmente publica también en Historias de Instagram (siempre la 1ª imagen).
 #   - Opcionalmente publica también en Threads (imagen suelta o carrusel).
+#   - Opcionalmente publica también en la página de Facebook (foto suelta o álbum).
 #
 # Cómo usarlo cada vez:
 #   1. Sube la(s) imagen(es) final(es) a la carpeta "images/" de este repo.
@@ -18,12 +19,16 @@ name: Publicar en Instagram
 #   5. "story": si / no   -> publica también en Historias (usa la primera imagen).
 #   6. "threads": si / no -> publica también en Threads.
 #   7. "caption_threads": versión corta para Threads (si lo dejas vacío usa el caption largo).
+#   8. "facebook": si / no -> publica también en la página de Facebook.
+#   9. "caption_facebook": texto para Facebook (si lo dejas vacío usa el caption largo).
 #
 # Secretos necesarios (Settings -> Secrets and variables -> Actions):
-#   IG_ACCOUNT_ID        -> 17841433174974811
-#   IG_ACCESS_TOKEN      -> token largo de Instagram
-#   THREADS_USER_ID      -> 28497515059900152
-#   THREADS_ACCESS_TOKEN -> token largo de Threads
+#   IG_ACCOUNT_ID         -> 17841433174974811
+#   IG_ACCESS_TOKEN       -> token largo de Instagram
+#   THREADS_USER_ID       -> 28497515059900152
+#   THREADS_ACCESS_TOKEN  -> token largo de Threads
+#   FB_PAGE_ID            -> 573938326000243
+#   FB_PAGE_ACCESS_TOKEN  -> TOKEN DE PÁGINA (no el de usuario), sacado de me/accounts
 
 on:
   workflow_dispatch:
@@ -34,6 +39,10 @@ on:
       caption:
         description: "Texto del post para Instagram. Para saltos de párrafo escribe \\n entre líneas"
         required: true
+      instagram:
+        description: "¿Publicar en el feed de Instagram? (si / no). Ponlo en no para probar solo otra red"
+        required: false
+        default: "si"
       story:
         description: "¿Publicar también en Historias de Instagram? (si / no)"
         required: false
@@ -44,6 +53,14 @@ on:
         default: "no"
       caption_threads:
         description: "Texto para Threads (más corto). Si lo dejas vacío se usa el de Instagram"
+        required: false
+        default: ""
+      facebook:
+        description: "¿Publicar también en la página de Facebook? (si / no)"
+        required: false
+        default: "no"
+      caption_facebook:
+        description: "Texto para Facebook. Si lo dejas vacío se usa el de Instagram"
         required: false
         default: ""
 
@@ -101,6 +118,7 @@ jobs:
 
       - name: Crear contenedor de medios (feed)
         id: create
+        if: ${{ github.event.inputs.instagram != 'no' }}
         env:
           URLS: ${{ steps.image.outputs.urls }}
           COUNT: ${{ steps.image.outputs.count }}
@@ -170,9 +188,11 @@ jobs:
           echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
 
       - name: Esperar a que Instagram procese el post
+        if: ${{ github.event.inputs.instagram != 'no' }}
         run: sleep 20
 
       - name: Publicar el post en el feed
+        if: ${{ github.event.inputs.instagram != 'no' }}
         env:
           CREATION_ID: ${{ steps.create.outputs.creation_id }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
@@ -301,3 +321,69 @@ jobs:
             exit 1
           fi
           echo "✅ Publicado en Threads @jeskocas"
+
+      - name: Publicar en la página de Facebook (si se pidió)
+        if: ${{ github.event.inputs.facebook == 'si' || github.event.inputs.facebook == 'sí' }}
+        env:
+          URLS: ${{ steps.image.outputs.urls }}
+          COUNT: ${{ steps.image.outputs.count }}
+          CAPTION_RAW: ${{ github.event.inputs.caption }}
+          CAPTION_FB_RAW: ${{ github.event.inputs.caption_facebook }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CAPTION_FB_RAW" ]; then
+            CAPTION_F=$(printf '%b' "$CAPTION_FB_RAW")
+          else
+            echo "Aviso: no se rellenó caption_facebook, se usará el texto de Instagram tal cual."
+            CAPTION_F=$(printf '%b' "$CAPTION_RAW")
+          fi
+          API="https://graph.facebook.com/v21.0"
+
+          if [ "$COUNT" = "1" ]; then
+            echo "--- Foto suelta en Facebook ---"
+            RESPONSE=$(curl -s -X POST "$API/$FB_PAGE_ID/photos" \
+              --data-urlencode "url=$URLS" \
+              --data-urlencode "caption=$CAPTION_F" \
+              --data-urlencode "access_token=$FB_PAGE_ACCESS_TOKEN")
+            echo "Respuesta de Facebook: $RESPONSE"
+            if echo "$RESPONSE" | grep -q '"error"'; then
+              echo "::error::Fallo al publicar en Facebook: $RESPONSE"
+              exit 1
+            fi
+          else
+            echo "--- Álbum de $COUNT fotos en Facebook ---"
+            # 1) Se sube cada foto SIN publicar, para quedarnos con su id
+            ARGS=()
+            N=0
+            for URL in $URLS; do
+              echo "Subiendo foto $((N+1))/$COUNT (sin publicar): $URL"
+              RESPONSE=$(curl -s -X POST "$API/$FB_PAGE_ID/photos" \
+                --data-urlencode "url=$URL" \
+                --data-urlencode "published=false" \
+                --data-urlencode "access_token=$FB_PAGE_ACCESS_TOKEN")
+              echo "  Respuesta: $RESPONSE"
+              PHOTO_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+              if [ -z "$PHOTO_ID" ]; then
+                echo "::error::Fallo al subir la foto $((N+1)) a Facebook: $RESPONSE"
+                exit 1
+              fi
+              ARGS+=(--data-urlencode "attached_media[$N]={\"media_fbid\":\"$PHOTO_ID\"}")
+              N=$((N+1))
+              sleep 2
+            done
+
+            # 2) Se crea la publicación con todas las fotos adjuntas
+            echo "Creando la publicación con las $COUNT fotos..."
+            RESPONSE=$(curl -s -X POST "$API/$FB_PAGE_ID/feed" \
+              --data-urlencode "message=$CAPTION_F" \
+              "${ARGS[@]}" \
+              --data-urlencode "access_token=$FB_PAGE_ACCESS_TOKEN")
+            echo "Respuesta de Facebook: $RESPONSE"
+            if echo "$RESPONSE" | grep -q '"error"'; then
+              echo "::error::Fallo al publicar el álbum en Facebook: $RESPONSE"
+              exit 1
+            fi
+          fi
+          echo "✅ Publicado en la página de Facebook"

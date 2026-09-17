@@ -1,39 +1,35 @@
 name: Publicar en Instagram
 
-# v3 (30/08/2026): añadido Threads.
-# La imagen sigue sin subirse a postimg.cc/imgur: se sube a la carpeta "images/"
-# de este repo y el robot construye la URL pública solo (vía jsDelivr).
-# Publica en el feed de Instagram, opcionalmente también en Historias de
-# Instagram, y opcionalmente también en Threads (con un texto propio y más
-# corto, porque en Threads no funciona bien copiar y pegar el mismo texto
-# largo de Instagram).
+# v4 (17/09/2026): añadido CARRUSEL (varias imágenes en un mismo post).
+#
+# Qué hace:
+#   - Publica en el feed de Instagram una imagen suelta O un carrusel de hasta 10.
+#   - Opcionalmente publica también en Historias de Instagram (siempre la 1ª imagen).
+#   - Opcionalmente publica también en Threads (imagen suelta o carrusel).
 #
 # Cómo usarlo cada vez:
-#   1. Sube la imagen final a la carpeta "images/" de este repo
-#      (entra en la carpeta -> Add file -> Upload files -> arrastra el archivo -> Commit).
-#   2. Ve a la pestaña Actions -> "Publicar en Instagram" -> Run workflow.
-#   3. En "image_filename" escribe SOLO el nombre del archivo que acabas de subir
-#      (ej: post-megaman-v1.png), no la ruta completa.
-#   4. Pega el texto del post en "caption" (el de Instagram, el largo).
-#   5. Si quieres que el mismo post salga también en Historias de Instagram,
-#      escribe "si" en "story" (si no, déjalo en "no").
-#   6. Si quieres publicar también en Threads, escribe "si" en "threads" y
-#      rellena "caption_threads" con una versión más corta y conversacional
-#      (100-200 caracteres, 0 o 1 hashtag como mucho). Si dejas "caption_threads"
-#      vacío pero pones "threads" en "si", se usará el mismo texto de Instagram
-#      (funciona, pero rinde peor en Threads).
+#   1. Sube la(s) imagen(es) final(es) a la carpeta "images/" de este repo.
+#   2. Actions -> "Publicar en Instagram" -> Run workflow.
+#   3. En "image_filename":
+#        - Una sola imagen:  post.png
+#        - Carrusel:         slide1.png,slide2.png,slide3.png
+#      (separadas por comas, EN ORDEN, sin espacios, máximo 10)
+#   4. Pega el texto del post en "caption".
+#   5. "story": si / no   -> publica también en Historias (usa la primera imagen).
+#   6. "threads": si / no -> publica también en Threads.
+#   7. "caption_threads": versión corta para Threads (si lo dejas vacío usa el caption largo).
 #
 # Secretos necesarios (Settings -> Secrets and variables -> Actions):
 #   IG_ACCOUNT_ID        -> 17841433174974811
-#   IG_ACCESS_TOKEN      -> el token largo de Instagram de la guía del proyecto
-#   THREADS_USER_ID       -> 28497515059900152
-#   THREADS_ACCESS_TOKEN -> el token largo de Threads de la guía del proyecto
+#   IG_ACCESS_TOKEN      -> token largo de Instagram
+#   THREADS_USER_ID      -> 28497515059900152
+#   THREADS_ACCESS_TOKEN -> token largo de Threads
 
 on:
   workflow_dispatch:
     inputs:
       image_filename:
-        description: "Nombre del archivo ya subido a la carpeta images/ (ej: post.png)"
+        description: "Archivo(s) de images/. Para carrusel: separa por comas EN ORDEN (máx 10)"
         required: true
       caption:
         description: "Texto del post para Instagram. Para saltos de párrafo escribe \\n entre líneas"
@@ -47,7 +43,7 @@ on:
         required: false
         default: "no"
       caption_threads:
-        description: "Texto para Threads (más corto y conversacional). Si lo dejas vacío se usa el mismo texto de Instagram"
+        description: "Texto para Threads (más corto). Si lo dejas vacío se usa el de Instagram"
         required: false
         default: ""
 
@@ -55,56 +51,126 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Construir y comprobar la URL pública de la imagen
+      - name: Construir y comprobar las URLs públicas de las imágenes
         id: image
         env:
-          IMAGE_FILENAME: ${{ github.event.inputs.image_filename }}
+          IMAGE_FILENAMES: ${{ github.event.inputs.image_filename }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          IMAGE_URL="https://cdn.jsdelivr.net/gh/$REPO@$SHA/images/$IMAGE_FILENAME"
-          echo "Probando: $IMAGE_URL"
-          for i in 1 2 3 4 5; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$IMAGE_URL")
-            if [ "$STATUS" = "200" ]; then
-              echo "Imagen encontrada (intento $i)."
-              break
-            fi
-            echo "Intento $i: la CDN aún no la sirve (status $STATUS), esperando..."
-            sleep 4
-            if [ "$i" = "5" ]; then
-              echo "::error::No se encontró la imagen en $IMAGE_URL. ¿Subiste el archivo a la carpeta images/ con ese nombre exacto, y ya está comiteado?"
+          URLS=""
+          COUNT=0
+          IFS=',' read -ra FILES <<< "$IMAGE_FILENAMES"
+          for RAW in "${FILES[@]}"; do
+            NAME=$(echo "$RAW" | xargs)          # quita espacios sobrantes
+            [ -z "$NAME" ] && continue
+            COUNT=$((COUNT+1))
+            if [ "$COUNT" -gt 10 ]; then
+              echo "::error::Instagram admite como máximo 10 imágenes por carrusel."
               exit 1
             fi
+            URL="https://cdn.jsdelivr.net/gh/$REPO@$SHA/images/$NAME"
+            echo "Probando ($COUNT): $URL"
+            OK=0
+            for i in 1 2 3 4 5; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+              if [ "$STATUS" = "200" ]; then
+                echo "  Imagen encontrada (intento $i)."
+                OK=1
+                break
+              fi
+              echo "  Intento $i: la CDN aún no la sirve (status $STATUS), esperando..."
+              sleep 4
+            done
+            if [ "$OK" != "1" ]; then
+              echo "::error::No se encontró la imagen en $URL. ¿Subiste '$NAME' a la carpeta images/ con ese nombre exacto y ya está comiteado?"
+              exit 1
+            fi
+            URLS="$URLS $URL"
           done
-          echo "image_url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::No se indicó ningún nombre de archivo."
+            exit 1
+          fi
+          URLS=$(echo "$URLS" | xargs)
+          echo "Total de imágenes: $COUNT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "urls=$URLS" >> "$GITHUB_OUTPUT"
+          echo "first_url=$(echo "$URLS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Crear contenedor de medios (feed)
         id: create
         env:
-          IMAGE_URL: ${{ steps.image.outputs.image_url }}
+          URLS: ${{ steps.image.outputs.urls }}
+          COUNT: ${{ steps.image.outputs.count }}
           CAPTION_RAW: ${{ github.event.inputs.caption }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
           CAPTION=$(printf '%b' "$CAPTION_RAW")
-          RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media" \
-            --data-urlencode "image_url=$IMAGE_URL" \
-            --data-urlencode "caption=$CAPTION" \
-            --data-urlencode "access_token=$IG_ACCESS_TOKEN")
-          echo "Respuesta de Meta: $RESPONSE"
-          CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
-          if [ -z "$CREATION_ID" ]; then
-            echo "::error::No se pudo crear el contenedor de medios: $RESPONSE"
-            exit 1
+          API="https://graph.facebook.com/v21.0"
+
+          if [ "$COUNT" = "1" ]; then
+            echo "--- Post de una sola imagen ---"
+            RESPONSE=$(curl -s -X POST "$API/$IG_ACCOUNT_ID/media" \
+              --data-urlencode "image_url=$URLS" \
+              --data-urlencode "caption=$CAPTION" \
+              --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+            echo "Respuesta de Meta: $RESPONSE"
+            CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+            if [ -z "$CREATION_ID" ]; then
+              echo "::error::No se pudo crear el contenedor de medios: $RESPONSE"
+              exit 1
+            fi
+          else
+            echo "--- Carrusel de $COUNT imágenes ---"
+            CHILDREN=""
+            N=0
+            for URL in $URLS; do
+              N=$((N+1))
+              echo "Creando hijo $N/$COUNT: $URL"
+              RESPONSE=$(curl -s -X POST "$API/$IG_ACCOUNT_ID/media" \
+                --data-urlencode "image_url=$URL" \
+                --data-urlencode "is_carousel_item=true" \
+                --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+              echo "  Respuesta: $RESPONSE"
+              CHILD_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+              if [ -z "$CHILD_ID" ]; then
+                echo "::error::Fallo al crear la imagen $N del carrusel: $RESPONSE"
+                exit 1
+              fi
+              if [ -z "$CHILDREN" ]; then
+                CHILDREN="$CHILD_ID"
+              else
+                CHILDREN="$CHILDREN,$CHILD_ID"
+              fi
+              sleep 3
+            done
+
+            echo "Esperando a que Instagram procese las imágenes del carrusel..."
+            sleep 15
+
+            echo "Creando el contenedor del carrusel con hijos: $CHILDREN"
+            RESPONSE=$(curl -s -X POST "$API/$IG_ACCOUNT_ID/media" \
+              --data-urlencode "media_type=CAROUSEL" \
+              --data-urlencode "children=$CHILDREN" \
+              --data-urlencode "caption=$CAPTION" \
+              --data-urlencode "access_token=$IG_ACCESS_TOKEN")
+            echo "Respuesta de Meta: $RESPONSE"
+            CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+            if [ -z "$CREATION_ID" ]; then
+              echo "::error::No se pudo crear el contenedor del carrusel: $RESPONSE"
+              exit 1
+            fi
           fi
+
           echo "El contenedor se creó con id $CREATION_ID"
           echo "creation_id=$CREATION_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Esperar a que Instagram procese la imagen
-        run: sleep 15
+      - name: Esperar a que Instagram procese el post
+        run: sleep 20
 
       - name: Publicar el post en el feed
         env:
@@ -126,11 +192,12 @@ jobs:
       - name: Crear y publicar también en Historias de Instagram (si se pidió)
         if: ${{ github.event.inputs.story == 'si' || github.event.inputs.story == 'sí' }}
         env:
-          IMAGE_URL: ${{ steps.image.outputs.image_url }}
+          IMAGE_URL: ${{ steps.image.outputs.first_url }}
           IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
+          echo "Las Historias no admiten carrusel: se publica la primera imagen."
           RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v21.0/$IG_ACCOUNT_ID/media" \
             --data-urlencode "image_url=$IMAGE_URL" \
             --data-urlencode "media_type=STORIES" \
@@ -155,7 +222,8 @@ jobs:
       - name: Crear y publicar en Threads (si se pidió)
         if: ${{ github.event.inputs.threads == 'si' || github.event.inputs.threads == 'sí' }}
         env:
-          IMAGE_URL: ${{ steps.image.outputs.image_url }}
+          URLS: ${{ steps.image.outputs.urls }}
+          COUNT: ${{ steps.image.outputs.count }}
           CAPTION_RAW: ${{ github.event.inputs.caption }}
           CAPTION_THREADS_RAW: ${{ github.event.inputs.caption_threads }}
           THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
@@ -168,24 +236,63 @@ jobs:
             echo "Aviso: no se rellenó caption_threads, se usará el texto de Instagram tal cual."
             CAPTION_T=$(printf '%b' "$CAPTION_RAW")
           fi
+          API="https://graph.threads.net/v1.0"
 
-          RESPONSE=$(curl -s -X POST "https://graph.threads.net/v1.0/$THREADS_USER_ID/threads" \
-            --data-urlencode "media_type=IMAGE" \
-            --data-urlencode "image_url=$IMAGE_URL" \
-            --data-urlencode "text=$CAPTION_T" \
-            --data-urlencode "access_token=$THREADS_ACCESS_TOKEN")
-          echo "Respuesta de Threads (crear): $RESPONSE"
-          CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+          if [ "$COUNT" = "1" ]; then
+            RESPONSE=$(curl -s -X POST "$API/$THREADS_USER_ID/threads" \
+              --data-urlencode "media_type=IMAGE" \
+              --data-urlencode "image_url=$URLS" \
+              --data-urlencode "text=$CAPTION_T" \
+              --data-urlencode "access_token=$THREADS_ACCESS_TOKEN")
+            echo "Respuesta de Threads (crear): $RESPONSE"
+            CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+          else
+            echo "--- Carrusel de $COUNT imágenes en Threads ---"
+            CHILDREN=""
+            N=0
+            for URL in $URLS; do
+              N=$((N+1))
+              echo "Creando hijo $N/$COUNT: $URL"
+              RESPONSE=$(curl -s -X POST "$API/$THREADS_USER_ID/threads" \
+                --data-urlencode "media_type=IMAGE" \
+                --data-urlencode "image_url=$URL" \
+                --data-urlencode "is_carousel_item=true" \
+                --data-urlencode "access_token=$THREADS_ACCESS_TOKEN")
+              echo "  Respuesta: $RESPONSE"
+              CHILD_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+              if [ -z "$CHILD_ID" ]; then
+                echo "::error::Fallo al crear la imagen $N del carrusel de Threads: $RESPONSE"
+                exit 1
+              fi
+              if [ -z "$CHILDREN" ]; then
+                CHILDREN="$CHILD_ID"
+              else
+                CHILDREN="$CHILDREN,$CHILD_ID"
+              fi
+              sleep 3
+            done
+
+            sleep 15
+
+            RESPONSE=$(curl -s -X POST "$API/$THREADS_USER_ID/threads" \
+              --data-urlencode "media_type=CAROUSEL" \
+              --data-urlencode "children=$CHILDREN" \
+              --data-urlencode "text=$CAPTION_T" \
+              --data-urlencode "access_token=$THREADS_ACCESS_TOKEN")
+            echo "Respuesta de Threads (carrusel): $RESPONSE"
+            CREATION_ID=$(echo "$RESPONSE" | grep -o '"id":"[0-9]*"' | head -1 | grep -o '[0-9]*')
+          fi
+
           if [ -z "$CREATION_ID" ]; then
-            echo "::error::No se pudo crear el contenedor de Threads: $RESPONSE"
+            echo "::error::No se pudo crear el contenedor de Threads."
             exit 1
           fi
           echo "El contenedor de Threads se creó con id $CREATION_ID"
 
-          echo "Esperando a que Threads procese la imagen..."
+          echo "Esperando a que Threads procese las imágenes..."
           sleep 20
 
-          RESPONSE2=$(curl -s -X POST "https://graph.threads.net/v1.0/$THREADS_USER_ID/threads_publish" \
+          RESPONSE2=$(curl -s -X POST "$API/$THREADS_USER_ID/threads_publish" \
             --data-urlencode "creation_id=$CREATION_ID" \
             --data-urlencode "access_token=$THREADS_ACCESS_TOKEN")
           echo "Respuesta de Threads (publicar): $RESPONSE2"
